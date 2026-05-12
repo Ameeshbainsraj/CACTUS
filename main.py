@@ -2,10 +2,10 @@
 CACTUS Personal AI Assistant v5.0 — Bulletproof Edition
 - JARVIS personality via Groq
 - Always listening, no wake word
-- Groq interprets EVERY command — no guessing needed locally
+- Local fast-path for all core commands (no Groq needed)
+- Groq only used for ambiguous/chat commands
 - TTS via PowerShell SAPI
-- Spotify desktop app only (no browser)
-- Smart intent routing via Groq for unknown commands
+- Spotify desktop app only
 """
 
 import os
@@ -97,12 +97,7 @@ def groq_request(messages: list, max_tokens: int = 500) -> str:
     except Exception as e:
         return f"Neural link down. {e}"
 
-# ── Groq Intent Parser — the brain behind every command ──────────────────────
 def parse_intent(cmd: str) -> dict:
-    """
-    Ask Groq to classify what the user wants and extract key info.
-    Returns a dict: { "intent": "...", "query": "...", "response": "..." }
-    """
     system_prompt = f"""
 You are the intent parser for CACTUS, a JARVIS-like AI assistant for {MASTER_NAME}.
 
@@ -128,23 +123,20 @@ Rules:
 - For casual chat, questions, jokes, general conversation → chat
 - ONLY return valid JSON, nothing else.
 
-Example output:
+Example:
 {{"intent": "spotify", "query": "Blinding Lights The Weeknd", "response": "Playing Blinding Lights on Spotify."}}
 """
     result = groq_request([
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": cmd}
+        {"role": "user",   "content": cmd}
     ], max_tokens=200)
 
     try:
-        # Extract JSON even if there's extra text
         match = re.search(r'\{.*\}', result, re.DOTALL)
         if match:
             return json.loads(match.group())
     except Exception:
         pass
-
-    # Fallback to chat if parsing fails
     return {"intent": "chat", "query": cmd, "response": ""}
 
 def ask_groq_chat(prompt: str) -> str:
@@ -229,6 +221,7 @@ def read_news(items):
 
 # ── Spotify — desktop app only ────────────────────────────────────────────────
 def open_spotify(query: str = ""):
+    query = query.strip()
     if query:
         encoded = urllib.parse.quote(query)
         uri = f"spotify:search:{encoded}"
@@ -237,14 +230,12 @@ def open_spotify(query: str = ""):
         uri = "spotify:"
         speak("Opening Spotify.")
 
-    # Open via URI — launches desktop app only, never browser
     subprocess.Popen(
         ["powershell", "-Command", f'Start-Process "{uri}"'],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
     if query:
-        # Wait for Spotify to focus then hit Enter to play first result
         time.sleep(2.5)
         subprocess.Popen(
             ["powershell", "-Command",
@@ -272,12 +263,8 @@ def set_volume(query: str, direction: str = ""):
 # ── Brightness ────────────────────────────────────────────────────────────────
 def set_brightness(query: str, direction: str = ""):
     m = re.search(r"(\d+)", query)
-    if m:
-        level = max(0, min(100, int(m.group(1))))
-    elif direction == "down":
-        level = 30
-    else:
-        level = 100
+    level = int(m.group(1)) if m else (30 if direction == "down" else 100)
+    level = max(0, min(100, level))
     subprocess.run(
         ["powershell", "-Command",
          f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)"
@@ -303,16 +290,19 @@ def take_screenshot():
 
 # ── Media keys ────────────────────────────────────────────────────────────────
 def send_media_key(key: str):
-    ps = f"$w=New-Object -ComObject WScript.Shell; $w.SendKeys('{key}')"
-    subprocess.run(["powershell", "-Command", ps], capture_output=True)
+    subprocess.run(
+        ["powershell", "-Command",
+         f"$w=New-Object -ComObject WScript.Shell; $w.SendKeys('{key}')"],
+        capture_output=True
+    )
 
 # ── System ────────────────────────────────────────────────────────────────────
 def handle_system(action: str):
     actions = {
-        "lock":     ("Locking up.", "rundll32.exe user32.dll,LockWorkStation"),
-        "sleep_pc": (f"Goodnight, {MASTER_NAME}.", "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
-        "shutdown": ("Shutting down.", "shutdown /s /t 5"),
-        "restart":  ("Restarting.", "shutdown /r /t 5"),
+        "lock":     ("Locking up.",                          "rundll32.exe user32.dll,LockWorkStation"),
+        "sleep_pc": (f"Goodnight, {MASTER_NAME}.",           "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
+        "shutdown": ("Shutting down. See you on the other side.", "shutdown /s /t 5"),
+        "restart":  ("Restarting. Back in a moment.",        "shutdown /r /t 5"),
     }
     msg, cmd = actions.get(action, ("Unknown system command.", ""))
     speak_wait(msg)
@@ -355,14 +345,14 @@ def boot_greeting():
 
     speak_wait(f"Briefing complete. I'm listening, {MASTER_NAME}.")
 
-# ── Master Command Router — Groq decides everything ───────────────────────────
+# ── Command Router ────────────────────────────────────────────────────────────
 def route_command(cmd: str):
     if not cmd.strip():
         return
 
     c = cmd.lower().strip()
 
-    # Hard-coded quick exits that don't need Groq
+    # ── Quiet / Resume — always first ────────────────────────────────────────
     if any(x in c for x in ["be quiet", "shut up", "go quiet", "stop talking", "silence"]):
         enter_quiet_mode(); return
     if any(x in c for x in ["talk to me", "come back", "wake up", "stop being quiet"]):
@@ -370,115 +360,183 @@ def route_command(cmd: str):
     if quiet_mode:
         return
 
-    print(f"[ROUTING] {cmd}")
+    # ── LOCAL FAST-PATH — core commands work even if Groq is down ────────────
 
-    # Ask Groq to parse intent
-    parsed = parse_intent(cmd)
-    intent  = parsed.get("intent", "chat")
-    query   = parsed.get("query", "")
-    response = parsed.get("response", "")
+    # Spotify
+    if "spotify" in c or re.search(r"\bplay\b", c):
+        query = re.sub(
+            r"\b(play|open|launch|spotify|on|please|up|some|me|and|put|start|cactus)\b",
+            "", c
+        ).strip(" ,.")
+        open_spotify(query); return
 
-    print(f"[INTENT] {intent} | query: {query}")
+    # Weather
+    if "weather" in c or "temperature" in c or "temp" in c or "how hot" in c or "how cold" in c:
+        m = re.search(r"(?:in|for|at)\s+([a-zA-Z\s]+)", c)
+        city = m.group(1).strip() if m else None
+        speak(get_weather(city)); return
 
-    # ── Execute based on intent ──────────────────────────────────────────────
-    if intent == "spotify":
-        open_spotify(query)
-
-    elif intent == "volume_up":
-        set_volume(query, "up")
-
-    elif intent == "volume_down":
-        set_volume(query, "down")
-
-    elif intent == "volume_set":
-        set_volume(query)
-
-    elif intent == "mute":
-        os.system("nircmd.exe mutesysvolume 1")
-        speak("Muted.")
-
-    elif intent == "unmute":
-        os.system("nircmd.exe mutesysvolume 0")
-        speak("Unmuted.")
-
-    elif intent == "brightness_up":
-        set_brightness(query, "up")
-
-    elif intent == "brightness_down":
-        set_brightness(query, "down")
-
-    elif intent == "brightness_set":
-        set_brightness(query)
-
-    elif intent == "weather":
-        speak(get_weather(query if query else None))
-
-    elif intent == "news_tamil":
-        speak("Tamil Nadu headlines.")
-        read_news(get_tamilnadu_news(4))
-
-    elif intent == "news_global":
+    # News
+    if any(x in c for x in ["news", "headlines", "what's happening"]):
+        if "tamil" in c:
+            speak("Tamil Nadu headlines.")
+            read_news(get_tamilnadu_news(4)); return
+        topic = re.sub(r"\b(news|headlines|about|on|latest|whats happening)\b", "", c).strip()
+        if topic and len(topic) > 2:
+            speak(f"News on {topic}.")
+            read_news(get_topic_news(topic, 4)); return
         speak("Global headlines.")
-        read_news(get_global_news(4))
+        read_news(get_global_news(4)); return
 
-    elif intent == "news_topic":
-        speak(f"News on {query}.")
-        read_news(get_topic_news(query, 4))
+    # Volume
+    if any(x in c for x in ["volume", "louder", "quieter", "turn up", "turn down"]):
+        if any(x in c for x in ["up", "louder", "turn up", "raise", "increase"]):
+            set_volume("", "up"); return
+        if any(x in c for x in ["down", "quieter", "turn down", "lower", "decrease"]):
+            set_volume("", "down"); return
+        set_volume(c); return
 
-    elif intent == "stock":
-        webbrowser.open(f"https://finance.yahoo.com/quote/{query.upper()}")
-        speak(f"Pulling up {query.upper()}.")
+    # Mute
+    if "unmute" in c:
+        os.system("nircmd.exe mutesysvolume 0"); speak("Unmuted."); return
+    if "mute" in c:
+        os.system("nircmd.exe mutesysvolume 1"); speak("Muted."); return
 
-    elif intent == "search":
+    # Brightness
+    if any(x in c for x in ["brightness", "dim", "brighten", "screen brighter", "screen darker"]):
+        if any(x in c for x in ["up", "brighten", "increase", "brighter"]):
+            set_brightness("", "up"); return
+        if any(x in c for x in ["down", "dim", "decrease", "darker"]):
+            set_brightness("", "down"); return
+        set_brightness(c); return
+
+    # Media
+    if any(x in c for x in ["next track", "next song", "skip"]):
+        send_media_key("{NEXTTRACK}"); speak("Next track."); return
+    if any(x in c for x in ["previous", "prev track", "go back"]):
+        send_media_key("{PREVTRACK}"); speak("Previous track."); return
+    if any(x in c for x in ["pause", "stop music", "pause music"]):
+        send_media_key("{MEDIA_PLAY_PAUSE}"); speak("Paused."); return
+    if any(x in c for x in ["resume music", "resume", "unpause"]):
+        send_media_key("{MEDIA_PLAY_PAUSE}"); speak("Resuming."); return
+
+    # Screenshot
+    if "screenshot" in c or "screen capture" in c:
+        take_screenshot(); return
+
+    # Time / Date
+    if any(x in c for x in ["time", "what day", "what's the date", "date"]):
+        speak(datetime.datetime.now().strftime("It's %I:%M %p on %A, %B %d.")); return
+
+    # Search
+    if any(x in c for x in ["search", "google", "look up", "find", "look for"]):
+        query = re.sub(r"\b(search|google|look up|find|look for|cactus)\b", "", c).strip()
         webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote(query)}")
-        speak(f"Searching for {query}.")
+        speak(f"Searching for {query}."); return
 
-    elif intent == "screenshot":
-        take_screenshot()
+    # Stocks
+    if any(x in c for x in ["stock", "share price", "shares"]):
+        ticker = re.sub(r"\b(stock|price|shares?|of|for|check|what is|whats)\b", "", c).strip().upper()
+        webbrowser.open(f"https://finance.yahoo.com/quote/{ticker}")
+        speak(f"Pulling up {ticker}."); return
 
-    elif intent == "time":
-        speak(datetime.datetime.now().strftime("It's %I:%M %p on %A, %B %d."))
-
-    elif intent == "whatsapp":
-        m = re.search(r"(\d+)\s+(.*)", query)
+    # WhatsApp
+    if "whatsapp" in c:
+        m = re.search(r"(\d+)\s+(.*)", c)
         if m:
             webbrowser.open(f"https://wa.me/{m.group(1)}?text={urllib.parse.quote(m.group(2))}")
             speak("WhatsApp message ready.")
         else:
             webbrowser.open("https://web.whatsapp.com")
             speak("Opening WhatsApp.")
+        return
 
-    elif intent == "email":
+    # Email
+    if any(x in c for x in ["email", "gmail", "compose"]):
         webbrowser.open("https://mail.google.com/mail/?view=cm&fs=1")
-        speak("Opening Gmail compose.")
+        speak("Opening Gmail compose."); return
 
+    # System
+    if "lock" in c:
+        handle_system("lock"); return
+    if "sleep" in c and "pc" in c:
+        handle_system("sleep_pc"); return
+    if "shutdown" in c or "shut down" in c:
+        handle_system("shutdown"); return
+    if "restart" in c or "reboot" in c:
+        handle_system("restart"); return
+
+    # Help
+    if "help" in c or "what can you do" in c:
+        speak(
+            f"You can ask me anything, {MASTER_NAME}. "
+            "Spotify, volume, brightness, WhatsApp, Gmail, "
+            "news, weather, stocks, Google, screenshots, system controls, "
+            "or just talk to me."
+        ); return
+
+    # ── Groq fallback — ambiguous or chat commands ────────────────────────────
+    print(f"[ROUTING → GROQ] {cmd}")
+    parsed  = parse_intent(cmd)
+    intent  = parsed.get("intent", "chat")
+    query   = parsed.get("query", cmd)
+    print(f"[INTENT] {intent} | query: {query}")
+
+    if intent == "spotify":
+        open_spotify(query)
+    elif intent == "weather":
+        speak(get_weather(query if query else None))
+    elif intent == "news_tamil":
+        speak("Tamil Nadu headlines."); read_news(get_tamilnadu_news(4))
+    elif intent == "news_global":
+        speak("Global headlines."); read_news(get_global_news(4))
+    elif intent == "news_topic":
+        speak(f"News on {query}."); read_news(get_topic_news(query, 4))
+    elif intent == "search":
+        webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote(query)}")
+        speak(f"Searching for {query}.")
+    elif intent == "stock":
+        webbrowser.open(f"https://finance.yahoo.com/quote/{query.upper()}")
+        speak(f"Pulling up {query.upper()}.")
+    elif intent == "screenshot":
+        take_screenshot()
+    elif intent == "time":
+        speak(datetime.datetime.now().strftime("It's %I:%M %p on %A, %B %d."))
+    elif intent == "volume_up":
+        set_volume("", "up")
+    elif intent == "volume_down":
+        set_volume("", "down")
+    elif intent == "volume_set":
+        set_volume(query)
+    elif intent == "mute":
+        os.system("nircmd.exe mutesysvolume 1"); speak("Muted.")
+    elif intent == "unmute":
+        os.system("nircmd.exe mutesysvolume 0"); speak("Unmuted.")
+    elif intent == "brightness_up":
+        set_brightness("", "up")
+    elif intent == "brightness_down":
+        set_brightness("", "down")
+    elif intent == "brightness_set":
+        set_brightness(query)
+    elif intent == "media_next":
+        send_media_key("{NEXTTRACK}"); speak("Next track.")
+    elif intent == "media_prev":
+        send_media_key("{PREVTRACK}"); speak("Previous track.")
+    elif intent == "media_pause":
+        send_media_key("{MEDIA_PLAY_PAUSE}"); speak("Paused.")
+    elif intent == "media_resume":
+        send_media_key("{MEDIA_PLAY_PAUSE}"); speak("Resuming.")
+    elif intent == "whatsapp":
+        webbrowser.open("https://web.whatsapp.com"); speak("Opening WhatsApp.")
+    elif intent == "email":
+        webbrowser.open("https://mail.google.com/mail/?view=cm&fs=1"); speak("Opening Gmail.")
     elif intent in ("lock", "sleep_pc", "shutdown", "restart"):
         handle_system(intent)
-
-    elif intent == "media_next":
-        send_media_key("{NEXTTRACK}")
-        speak("Next track.")
-
-    elif intent == "media_prev":
-        send_media_key("{PREVTRACK}")
-        speak("Previous track.")
-
-    elif intent == "media_pause":
-        send_media_key("{MEDIA_PLAY_PAUSE}")
-        speak("Paused.")
-
-    elif intent == "media_resume":
-        send_media_key("{MEDIA_PLAY_PAUSE}")
-        speak("Resuming.")
-
     elif intent == "quiet_mode":
         enter_quiet_mode()
-
     elif intent == "resume_mode":
         exit_quiet_mode()
-
     else:
-        # chat — full JARVIS conversation
         speak(ask_groq_chat(cmd))
 
 # ── Voice Loop ────────────────────────────────────────────────────────────────
@@ -488,9 +546,9 @@ def voice_loop():
         import speech_recognition as sr
 
         recognizer = sr.Recognizer()
-        recognizer.energy_threshold          = 300
-        recognizer.dynamic_energy_threshold  = True
-        recognizer.pause_threshold           = 0.8
+        recognizer.energy_threshold         = 300
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold          = 0.8
 
         try:
             mic = sr.Microphone()
