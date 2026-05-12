@@ -1,0 +1,6 @@
+python-dotenv
+SpeechRecognition
+pyttsx3
+pywebview
+pyaudio
+requests

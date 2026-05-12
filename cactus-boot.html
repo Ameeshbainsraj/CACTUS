@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>CACTUS BOOT</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100vw; height:100vh;
+    background:#000;
+    font-family:'Courier New', monospace;
+    color:#00ff88;
+    overflow:hidden;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+  }
+
+  /* Scanline overlay */
+  body::before {
+    content:'';
+    position:fixed; top:0; left:0;
+    width:100%; height:100%;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 3px,
+      rgba(0,0,0,0.08) 3px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events:none; z-index:100;
+  }
+
+  #boot-wrap {
+    display:flex; flex-direction:column;
+    align-items:center; gap:32px;
+    opacity:0; animation: fadein 1s ease 0.3s forwards;
+  }
+
+  /* Cactus SVG logo */
+  #logo-svg {
+    filter: drop-shadow(0 0 18px #00ff88) drop-shadow(0 0 40px #00ff8855);
+    animation: logopulse 3s ease-in-out infinite;
+  }
+  @keyframes logopulse {
+    0%,100% { filter: drop-shadow(0 0 14px #00ff88) drop-shadow(0 0 30px #00ff8844); }
+    50%      { filter: drop-shadow(0 0 28px #00ff88) drop-shadow(0 0 60px #00ff8888); }
+  }
+
+  #name {
+    font-size: 52px;
+    font-weight: 900;
+    letter-spacing: 18px;
+    color: #00ff88;
+    text-shadow: 0 0 20px #00ff88, 0 0 60px #00ff8855;
+    text-transform: uppercase;
+  }
+
+  #tagline {
+    font-size: 12px;
+    letter-spacing: 6px;
+    color: rgba(0,255,136,0.45);
+    text-transform: uppercase;
+  }
+
+  /* Boot log */
+  #boot-log {
+    width: 480px;
+    background: rgba(0,255,136,0.04);
+    border: 1px solid rgba(0,255,136,0.15);
+    border-radius: 8px;
+    padding: 18px 22px;
+    font-size: 12px;
+    line-height: 2;
+    color: rgba(0,255,136,0.7);
+    min-height: 180px;
+  }
+  .log-line { opacity:0; animation: linein 0.3s ease forwards; }
+  .log-line .ok  { color: #00ff88; margin-left: 8px; }
+  .log-line .dot { color: rgba(0,255,136,0.35); }
+
+  /* Progress bar */
+  #progress-wrap {
+    width: 480px;
+  }
+  #progress-label {
+    display:flex; justify-content:space-between;
+    font-size:11px; color:rgba(0,255,136,0.5);
+    margin-bottom:6px; letter-spacing:2px;
+  }
+  #progress-bar-bg {
+    width:100%; height:3px;
+    background:rgba(0,255,136,0.1);
+    border-radius:2px; overflow:hidden;
+  }
+  #progress-bar {
+    height:100%; width:0%;
+    background: linear-gradient(to right, #004422, #00ff88);
+    border-radius:2px;
+    transition: width 0.4s ease;
+    box-shadow: 0 0 10px #00ff88;
+  }
+
+  /* Online badge */
+  #online {
+    font-size:13px; letter-spacing:5px;
+    color:#00ff88;
+    text-shadow:0 0 12px #00ff88;
+    opacity:0;
+    transition:opacity 0.8s;
+  }
+
+  @keyframes fadein {
+    from {opacity:0; transform:translateY(12px);}
+    to   {opacity:1; transform:translateY(0);}
+  }
+  @keyframes linein {
+    from {opacity:0; transform:translateX(-6px);}
+    to   {opacity:1; transform:translateX(0);}
+  }
+</style>
+</head>
+<body>
+<div id="boot-wrap">
+
+  <!-- Cactus Logo -->
+  <svg id="logo-svg" width="90" height="110" viewBox="0 0 90 110" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="38" y="12" width="14" height="72" rx="7" fill="#00ff88"/>
+    <rect x="12" y="32" width="26" height="12" rx="6" fill="#00ff88"/>
+    <rect x="6" y="20" width="12" height="30" rx="6" fill="#00ff88"/>
+    <rect x="52" y="40" width="26" height="12" rx="6" fill="#00ff88"/>
+    <rect x="72" y="28" width="12" height="30" rx="6" fill="#00ff88"/>
+    <rect x="28" y="84" width="34" height="10" rx="4" fill="#00ff88" opacity="0.4"/>
+    <rect x="34" y="94" width="22" height="8" rx="3" fill="#00ff88" opacity="0.25"/>
+  </svg>
+
+  <div id="name">CACTUS</div>
+  <div id="tagline">Personal AI Assistant &nbsp;·&nbsp; v5.0</div>
+
+  <!-- Boot log -->
+  <div id="boot-log"></div>
+
+  <!-- Progress -->
+  <div id="progress-wrap">
+    <div id="progress-label">
+      <span>INITIALISING</span>
+      <span id="pct">0%</span>
+    </div>
+    <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+  </div>
+
+  <div id="online">● SYSTEM ONLINE</div>
+</div>
+
+<script>
+  const log     = document.getElementById('boot-log');
+  const bar     = document.getElementById('progress-bar');
+  const pct     = document.getElementById('pct');
+  const online  = document.getElementById('online');
+
+  const steps = [
+    { text: 'Loading core modules',         delay: 400  },
+    { text: 'Initialising voice engine',    delay: 900  },
+    { text: 'Connecting to Groq AI',        delay: 1500 },
+    { text: 'Calibrating microphone',       delay: 2200 },
+    { text: 'Fetching weather data',        delay: 2900 },
+    { text: 'Loading Tamil Nadu news feed', delay: 3600 },
+    { text: 'Loading global news feed',     delay: 4200 },
+    { text: 'Starting HUD overlay',         delay: 4800 },
+    { text: 'All systems ready',            delay: 5400 },
+  ];
+
+  steps.forEach((step, i) => {
+    setTimeout(() => {
+      const div = document.createElement('div');
+      div.className = 'log-line';
+      const progress = Math.round(((i + 1) / steps.length) * 100);
+      div.innerHTML = `<span class="dot">▸</span> ${step.text}<span class="ok">✓</span>`;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+
+      bar.style.width = progress + '%';
+      pct.textContent = progress + '%';
+
+      if (i === steps.length - 1) {
+        setTimeout(() => {
+          online.style.opacity = '1';
+          // Auto-close after 1.5s — main HUD takes over
+          setTimeout(() => {
+            document.body.style.transition = 'opacity 1s';
+            document.body.style.opacity = '0';
+            setTimeout(() => window.close(), 1100);
+          }, 1500);
+        }, 400);
+      }
+    }, step.delay);
+  });
+</script>
+</body>
+</html>

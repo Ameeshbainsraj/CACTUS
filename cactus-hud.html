@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>CACTUS HUD</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    background:transparent;
+    font-family:'Courier New', monospace;
+    color:#00ff88;
+    overflow:hidden;
+    width:100vw; height:100vh;
+    user-select:none;
+  }
+
+  /* Scanline */
+  #scanline {
+    position:fixed; top:0; left:0;
+    width:100vw; height:2px;
+    background:linear-gradient(to right, transparent 0%, #00ff88 50%, transparent 100%);
+    opacity:0.12;
+    animation:scan 7s linear infinite;
+    pointer-events:none; z-index:1;
+  }
+  @keyframes scan { 0%{top:0} 100%{top:100vh} }
+
+  /* Corner brackets */
+  .corner {
+    position:fixed; width:22px; height:22px;
+    border-color:rgba(0,255,136,0.22); border-style:solid;
+    pointer-events:none; z-index:2;
+  }
+  .tl{top:10px;left:10px;border-width:2px 0 0 2px;}
+  .tr{top:10px;right:10px;border-width:2px 2px 0 0;}
+  .bl{bottom:10px;left:10px;border-width:0 0 2px 2px;}
+  .br{bottom:10px;right:10px;border-width:0 2px 2px 0;}
+
+  /* Main panel */
+  #panel {
+    position:fixed; top:22px; left:22px;
+    width:240px;
+    background:rgba(0,0,0,0.6);
+    border:1px solid rgba(0,255,136,0.18);
+    border-radius:12px;
+    padding:16px 18px 14px;
+    backdrop-filter:blur(10px);
+    transition:opacity 1.4s ease, transform 1.4s ease;
+    pointer-events:all;
+    z-index:10;
+  }
+  #panel.hidden {
+    opacity:0; transform:translateX(-20px); pointer-events:none;
+  }
+
+  .panel-header {
+    display:flex; align-items:center; gap:10px;
+    margin-bottom:14px;
+    border-bottom:1px solid rgba(0,255,136,0.1);
+    padding-bottom:12px;
+  }
+  .panel-title {
+    font-size:14px; font-weight:bold;
+    letter-spacing:5px; color:#00ff88;
+    text-shadow:0 0 10px #00ff88;
+  }
+
+  .dot-status {
+    width:7px; height:7px; border-radius:50%;
+    background:#00ff88; box-shadow:0 0 8px #00ff88;
+    margin-left:auto;
+    animation:blink 2.5s ease-in-out infinite;
+  }
+  .dot-status.quiet {
+    background:#ff4455; box-shadow:0 0 8px #ff4455;
+    animation:none;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+  .row {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:5px 0;
+    border-bottom:1px solid rgba(0,255,136,0.06);
+    font-size:10.5px;
+    color:rgba(0,255,136,0.55);
+  }
+  .row:last-child{border-bottom:none;}
+  .row .val { color:#00ff88; font-weight:bold; font-size:11px; }
+
+  /* ── Orb ── */
+  #orb {
+    position:fixed; bottom:24px; right:24px;
+    width:52px; height:52px; border-radius:50%;
+    background:radial-gradient(circle at 36% 36%, #00ff88 0%, #003318 75%);
+    box-shadow:0 0 16px #00ff8866, 0 0 5px #00ff88aa;
+    cursor:pointer; z-index:999;
+    display:flex; align-items:center; justify-content:center;
+    animation:orbpulse 3.5s ease-in-out infinite;
+    transition:transform 0.18s, box-shadow 0.18s;
+  }
+  #orb:hover { transform:scale(1.14); box-shadow:0 0 28px #00ff88bb; }
+  #orb.quiet {
+    background:radial-gradient(circle at 36% 36%, #ff4455 0%, #330011 75%);
+    box-shadow:0 0 16px #ff445566;
+    animation:none;
+  }
+  @keyframes orbpulse {
+    0%,100%{box-shadow:0 0 12px #00ff8844,0 0 4px #00ff88aa;}
+    50%    {box-shadow:0 0 26px #00ff8899,0 0 10px #00ff88;}
+  }
+
+  /* Last spoken bubble */
+  #bubble {
+    position:fixed; bottom:86px; right:24px;
+    max-width:210px;
+    background:rgba(0,0,0,0.75);
+    border:1px solid rgba(0,255,136,0.18);
+    border-radius:10px;
+    padding:9px 13px;
+    font-size:10.5px; color:rgba(0,255,136,0.8);
+    text-align:right;
+    opacity:0; pointer-events:none;
+    transition:opacity 0.35s;
+    backdrop-filter:blur(6px);
+    z-index:998;
+  }
+  #bubble.show{opacity:1;}
+
+  /* Quiet banner */
+  #quiet-banner {
+    position:fixed; top:50%; left:50%;
+    transform:translate(-50%,-50%);
+    background:rgba(0,0,0,0.88);
+    border:1px solid rgba(255,68,80,0.35);
+    border-radius:14px;
+    padding:20px 36px;
+    font-size:13px; letter-spacing:4px;
+    color:#ff8899; text-shadow:0 0 10px #ff4455;
+    opacity:0; pointer-events:none;
+    transition:opacity 0.5s; z-index:997;
+  }
+  #quiet-banner.show{opacity:1;}
+</style>
+</head>
+<body>
+
+<div id="scanline"></div>
+<div class="corner tl"></div>
+<div class="corner tr"></div>
+<div class="corner bl"></div>
+<div class="corner br"></div>
+
+<!-- HUD Panel -->
+<div id="panel">
+  <div class="panel-header">
+    <!-- Inline cactus -->
+    <svg width="24" height="30" viewBox="0 0 60 76" fill="none">
+      <rect x="24" y="6" width="12" height="52" rx="6" fill="#00ff88"/>
+      <rect x="7"  y="20" width="17" height="9" rx="4.5" fill="#00ff88"/>
+      <rect x="3"  y="12" width="9"  height="22" rx="4.5" fill="#00ff88"/>
+      <rect x="36" y="26" width="17" height="9" rx="4.5" fill="#00ff88"/>
+      <rect x="48" y="18" width="9"  height="22" rx="4.5" fill="#00ff88"/>
+      <rect x="19" y="58" width="22" height="7" rx="3" fill="#00ff88" opacity="0.4"/>
+    </svg>
+    <span class="panel-title">CACTUS</span>
+    <div class="dot-status" id="status-dot"></div>
+  </div>
+
+  <div class="row"><span>STATUS</span> <span class="val" id="status-txt">ACTIVE</span></div>
+  <div class="row"><span>TIME</span>   <span class="val" id="clock">--:--:--</span></div>
+  <div class="row"><span>DATE</span>   <span class="val" id="date-txt">---</span></div>
+  <div class="row"><span>WAKE WORD</span><span class="val">CACTUS</span></div>
+  <div class="row"><span>MODE</span>  <span class="val" id="mode-txt">VOICE</span></div>
+  <div class="row"><span>AI</span>    <span class="val">GROQ / LLAMA 3.3</span></div>
+</div>
+
+<!-- Orb -->
+<div id="orb" onclick="togglePanel()" title="Toggle HUD">
+  <svg width="24" height="30" viewBox="0 0 60 76" fill="none">
+    <rect x="24" y="6" width="12" height="52" rx="6" fill="white"/>
+    <rect x="7"  y="20" width="17" height="9" rx="4.5" fill="white"/>
+    <rect x="3"  y="12" width="9"  height="22" rx="4.5" fill="white"/>
+    <rect x="36" y="26" width="17" height="9" rx="4.5" fill="white"/>
+    <rect x="48" y="18" width="9"  height="22" rx="4.5" fill="white"/>
+  </svg>
+</div>
+
+<!-- Bubble -->
+<div id="bubble"></div>
+
+<!-- Quiet banner -->
+<div id="quiet-banner">🔇 &nbsp;CACTUS IS QUIET</div>
+
+<script>
+  const panel      = document.getElementById('panel');
+  const orb        = document.getElementById('orb');
+  const statusDot  = document.getElementById('status-dot');
+  const statusTxt  = document.getElementById('status-txt');
+  const modeTxt    = document.getElementById('mode-txt');
+  const bubble     = document.getElementById('bubble');
+  const quietBanner= document.getElementById('quiet-banner');
+  const clockEl    = document.getElementById('clock');
+  const dateEl     = document.getElementById('date-txt');
+
+  let panelVisible = true;
+  let isQuiet      = false;
+  let fadeTimer    = null;
+  const FADE_MS    = 60000;  // 60 seconds
+
+  // ── Clock ──
+  function tick() {
+    const n = new Date();
+    const pad = x => String(x).padStart(2,'0');
+    clockEl.textContent = `${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+    const days   = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+    const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    dateEl.textContent = `${days[n.getDay()]} ${n.getDate()} ${months[n.getMonth()]}`;
+  }
+  setInterval(tick, 1000); tick();
+
+  // ── Panel toggle ──
+  function togglePanel() {
+    panelVisible = !panelVisible;
+    panel.classList.toggle('hidden', !panelVisible);
+    resetFade();
+  }
+
+  // ── Auto-fade ──
+  function resetFade() {
+    clearTimeout(fadeTimer);
+    if (panelVisible) {
+      fadeTimer = setTimeout(() => {
+        panel.classList.add('hidden');
+        panelVisible = false;
+      }, FADE_MS);
+    }
+  }
+  document.addEventListener('mousemove', () => {
+    if (!panelVisible) {
+      panel.classList.remove('hidden');
+      panelVisible = true;
+    }
+    resetFade();
+  });
+  resetFade();
+
+  // ── External events (called from Python via pywebview js_api or ws) ──
+  window.cactus = {
+    quiet: () => setQuiet(true),
+    talk:  () => setQuiet(false),
+    say:   (txt) => showBubble(txt),
+  };
+
+  function setQuiet(q) {
+    isQuiet = q;
+    orb.classList.toggle('quiet', q);
+    statusDot.classList.toggle('quiet', q);
+    statusTxt.textContent = q ? 'QUIET'  : 'ACTIVE';
+    modeTxt.textContent   = q ? 'SILENT' : 'VOICE';
+    quietBanner.classList.add('show');
+    if (!q) setTimeout(() => quietBanner.classList.remove('show'), 2200);
+  }
+
+  function showBubble(txt) {
+    bubble.textContent = txt;
+    bubble.classList.add('show');
+    clearTimeout(bubble._t);
+    bubble._t = setTimeout(() => bubble.classList.remove('show'), 4200);
+  }
+
+  // ── Keyboard shortcuts ──
+  document.addEventListener('keydown', e => {
+    if (e.key === 'h' || e.key === 'H') togglePanel();
+  });
+</script>
+</body>
+</html>
