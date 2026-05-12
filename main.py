@@ -1,10 +1,11 @@
 """
-CACTUS Personal AI Assistant v5.0
-- JARVIS-like personality
-- Responds to ALL voice commands — no wake word needed
-- TTS via PowerShell SAPI (guaranteed on Windows)
-- Spotify auto-play via URI
-- Smart command guessing via Groq for unknown inputs
+CACTUS Personal AI Assistant v5.0 — Bulletproof Edition
+- JARVIS personality via Groq
+- Always listening, no wake word
+- Groq interprets EVERY command — no guessing needed locally
+- TTS via PowerShell SAPI
+- Spotify desktop app only (no browser)
+- Smart intent routing via Groq for unknown commands
 """
 
 import os
@@ -26,17 +27,15 @@ load_dotenv()
 # ── Config ───────────────────────────────────────────────────────────────────
 GROQ_API_KEY  = os.getenv("GROQ_API_KEY", "")
 MASTER_NAME   = os.getenv("MASTER_NAME", "Master")
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
 WEATHER_CITY  = os.getenv("WEATHER_CITY", "Chennai")
 
 # ── State ────────────────────────────────────────────────────────────────────
 quiet_mode   = False
 voice_active = False
 
-# ── TTS — PowerShell SAPI ─────────────────────────────────────────────────────
-_tts_queue  = queue.Queue()
-_tts_ready  = threading.Event()
-_tts_engine = None
+# ── TTS — PowerShell SAPI ────────────────────────────────────────────────────
+_tts_queue = queue.Queue()
+_tts_ready = threading.Event()
 
 def _speak_powershell_blocking(text: str):
     safe = text.replace("'", "").replace('"', "")
@@ -45,8 +44,7 @@ def _speak_powershell_blocking(text: str):
          f"Add-Type -AssemblyName System.Speech; "
          f"$s=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
          f"$s.Rate=2; $s.Volume=100; $s.Speak('{safe}')"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
 def _tts_worker():
@@ -75,31 +73,15 @@ def speak_wait(text: str):
     if not quiet_mode:
         _tts_queue.join()
 
-def debug_tts():
-    print("[DEBUG] TTS mode: PowerShell SAPI (guaranteed)")
-
-# ── Groq Brain — JARVIS personality ──────────────────────────────────────────
-def ask_groq(prompt: str) -> str:
+# ── Groq — Central Brain ──────────────────────────────────────────────────────
+def groq_request(messages: list, max_tokens: int = 500) -> str:
     if not GROQ_API_KEY:
-        return "No Groq API key configured, sir."
+        return "No Groq API key set."
     try:
         payload = json.dumps({
             "model": "llama-3.3-70b-versatile",
-            "max_tokens": 500,
-            "messages": [
-                {"role": "system", "content": (
-                    f"You are CACTUS, a highly intelligent personal AI assistant — "
-                    f"think JARVIS from Iron Man. You serve {MASTER_NAME} exclusively. "
-                    f"Your tone is calm, composed, witty, and razor-sharp. "
-                    f"You are never sycophantic. You speak in short, punchy sentences — "
-                    f"maximum 2-3 sentences per response unless more detail is explicitly requested. "
-                    f"You occasionally make dry, clever remarks. "
-                    f"You address {MASTER_NAME} by name naturally, not every sentence. "
-                    f"Never say 'Certainly!' or 'Of course!' or 'Great question!' — "
-                    f"just answer directly and confidently."
-                )},
-                {"role": "user", "content": prompt}
-            ]
+            "max_tokens": max_tokens,
+            "messages": messages
         }).encode()
         req = urllib.request.Request(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -111,109 +93,85 @@ def ask_groq(prompt: str) -> str:
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        return f"My neural link is down, {MASTER_NAME}. {e}"
+        return f"Neural link down. {e}"
 
-# ── Groq Command Guesser ──────────────────────────────────────────────────────
-def guess_command(cmd: str) -> str:
-    """Ask Groq to interpret an ambiguous command and respond naturally."""
-    if not GROQ_API_KEY:
-        return ask_groq(cmd)
-    try:
-        payload = json.dumps({
-            "model": "llama-3.3-70b-versatile",
-            "max_tokens": 300,
-            "messages": [
-                {"role": "system", "content": (
-                    f"You are CACTUS, a JARVIS-like AI assistant for {MASTER_NAME}. "
-                    f"The user said something you need to interpret. "
-                    f"Figure out what they most likely want — whether it's information, "
-                    f"a task, a question, small talk, or anything else — and respond naturally. "
-                    f"Be concise, witty, and direct. Max 2-3 sentences. "
-                    f"If it sounds like they want music, news, weather, or web search, "
-                    f"tell them what you'd do and do your best to answer."
-                )},
-                {"role": "user", "content": cmd}
-            ]
-        }).encode()
-        req = urllib.request.Request(
-            "https://api.groq.com/openai/v1/chat/completions",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            }
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-            return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"Couldn't parse that one, {MASTER_NAME}. {e}"
+# ── Groq Intent Parser — the brain behind every command ──────────────────────
+def parse_intent(cmd: str) -> dict:
+    """
+    Ask Groq to classify what the user wants and extract key info.
+    Returns a dict: { "intent": "...", "query": "...", "response": "..." }
+    """
+    system_prompt = f"""
+You are the intent parser for CACTUS, a JARVIS-like AI assistant for {MASTER_NAME}.
 
-# ── Spotify — search + auto play ─────────────────────────────────────────────
-def get_spotify_track_uri(query: str) -> str:
-    """Search Spotify API for a track and return its URI for direct playback."""
+Given a user's voice command, return a JSON object with:
+- "intent": one of [spotify, volume_up, volume_down, volume_set, mute, unmute,
+  brightness_set, brightness_up, brightness_down,
+  whatsapp, email, news_tamil, news_global, news_topic,
+  weather, stock, search, screenshot, time, lock, sleep_pc,
+  shutdown, restart, media_next, media_prev, media_pause, media_resume,
+  quiet_mode, resume_mode, chat]
+- "query": the main subject/search term extracted (song name, city, topic, number etc.)
+- "response": a short JARVIS-style spoken confirmation (1 sentence, witty, direct)
+
+Rules:
+- If user says anything about music/songs/artists → spotify
+- If user says open/launch/start spotify with no song → intent=spotify, query=""
+- For volume: extract number if given, else just up/down
+- For brightness: extract number if given
+- For news: detect if tamil, global, or specific topic
+- For weather: extract city name or use default
+- For stocks: extract ticker symbol
+- For search/google/find/look up: extract search query
+- For casual chat, questions, jokes, general conversation → chat
+- ONLY return valid JSON, nothing else.
+
+Example output:
+{{"intent": "spotify", "query": "Blinding Lights The Weeknd", "response": "Playing Blinding Lights on Spotify."}}
+"""
+    result = groq_request([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": cmd}
+    ], max_tokens=200)
+
     try:
-        encoded = urllib.parse.quote(query)
-        url = f"https://api.spotify.com/v1/search?q={encoded}&type=track&limit=1"
-        # Use open.spotify.com search URL with autoplay intent via URI
-        # We use the spotify: URI scheme which triggers the desktop app directly
-        return f"spotify:search:{encoded}"
+        # Extract JSON even if there's extra text
+        match = re.search(r'\{.*\}', result, re.DOTALL)
+        if match:
+            return json.loads(match.group())
     except Exception:
-        return ""
+        pass
 
-def handle_spotify(cmd: str):
-    # Extract the song/artist query
-    query = re.sub(
-        r"\b(play|open|launch|spotify|on|via|using|start|put on|queue)\b",
-        "", cmd, flags=re.IGNORECASE
-    ).strip(" ,.")
+    # Fallback to chat if parsing fails
+    return {"intent": "chat", "query": cmd, "response": ""}
 
-    if query:
-        encoded = urllib.parse.quote(query)
-        # This URI opens Spotify desktop app AND triggers search + play
-        spotify_uri = f"spotify:search:{encoded}"
-        # Also open web fallback
-        web_url = f"https://open.spotify.com/search/{encoded}"
-
-        speak(f"Playing {query} on Spotify.")
-        # Open the URI — Spotify desktop app handles autoplay
-        subprocess.Popen(
-            ["powershell", "-Command", f'Start-Process "{spotify_uri}"'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        time.sleep(1.5)
-        # Simulate pressing Enter/Play in Spotify using keyboard shortcut
-        ps_play = (
-            "$w = New-Object -ComObject WScript.Shell; "
-            "Start-Sleep -Milliseconds 800; "
-            "$w.AppActivate('Spotify'); "
-            "Start-Sleep -Milliseconds 500; "
-            "$w.SendKeys(' ')"   # Space bar = play/pause in Spotify
-        )
-        subprocess.Popen(
-            ["powershell", "-Command", ps_play],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    else:
-        speak("Opening Spotify.")
-        subprocess.Popen(
-            ["powershell", "-Command", 'Start-Process "spotify:"'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+def ask_groq_chat(prompt: str) -> str:
+    return groq_request([
+        {"role": "system", "content": (
+            f"You are CACTUS, a highly intelligent personal AI — think JARVIS from Iron Man. "
+            f"You serve {MASTER_NAME} exclusively. "
+            f"Tone: calm, composed, witty, razor-sharp. Never sycophantic. "
+            f"Max 2-3 sentences. Dry humour occasionally. "
+            f"Address {MASTER_NAME} by name naturally, not every sentence. "
+            f"Never say Certainly, Of course, or Great question."
+        )},
+        {"role": "user", "content": prompt}
+    ])
 
 # ── Weather ───────────────────────────────────────────────────────────────────
 def get_weather(city: str = None) -> str:
     city = city or WEATHER_CITY
     try:
         encoded = urllib.parse.quote(city)
-        url = f"https://wttr.in/{encoded}?format=3"
-        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
+        req = urllib.request.Request(
+            f"https://wttr.in/{encoded}?format=3",
+            headers={"User-Agent": "curl/7.68.0"}
+        )
         with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read().decode("utf-8").strip()
-            clean = re.sub(r'[^\x00-\x7F+\-\d\w\s:,.]', '', raw).strip()
-            return clean
+            return re.sub(r'[^\x00-\x7F+\-\d\w\s:,.]', '', raw).strip()
     except Exception as e:
         return f"Could not fetch weather: {e}"
 
@@ -223,17 +181,14 @@ def fetch_rss(url: str, count: int = 3):
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             content = resp.read().decode("utf-8", errors="ignore")
-        items = re.findall(r"<item>(.*?)</item>", content, re.DOTALL)
         results = []
-        for item in items[:count]:
-            t = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item)
-            if not t:
-                t = re.search(r"<title>(.*?)</title>", item)
+        for item in re.findall(r"<item>(.*?)</item>", content, re.DOTALL)[:count]:
+            t = re.search(r"<title><!\[CDATA\[(.*?)\]\]></title>", item) or \
+                re.search(r"<title>(.*?)</title>", item)
+            l = re.search(r"<link>(.*?)</link>", item) or \
+                re.search(r"<guid[^>]*>(https?://[^<]+)</guid>", item)
             title = t.group(1).strip() if t else ""
-            l = re.search(r"<link>(.*?)</link>", item)
-            if not l:
-                l = re.search(r"<guid[^>]*>(https?://[^<]+)</guid>", item)
-            link = l.group(1).strip() if l else ""
+            link  = l.group(1).strip() if l else ""
             if title:
                 results.append((title, link))
         return results
@@ -241,201 +196,133 @@ def fetch_rss(url: str, count: int = 3):
         return []
 
 def get_tamilnadu_news(count=3):
-    feeds = [
+    for feed in [
         "https://www.thehindu.com/news/national/tamil-nadu/feeder/default.rss",
-        "https://feeds.feedburner.com/ndtvnews-tamil-nadu",
         "https://timesofindia.indiatimes.com/rssfeeds/-2128938702.cms",
-    ]
-    for feed in feeds:
+    ]:
         items = fetch_rss(feed, count)
         if items:
             return items
     return [("Could not fetch Tamil Nadu news.", "")]
 
 def get_global_news(count=3):
-    feeds = [
+    for feed in [
         "https://feeds.bbci.co.uk/news/world/rss.xml",
         "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
-    ]
-    for feed in feeds:
+    ]:
         items = fetch_rss(feed, count)
         if items:
             return items
     return [("Could not fetch global news.", "")]
 
 def get_topic_news(topic: str, count=3):
-    encoded = urllib.parse.quote(topic)
-    url = f"https://news.google.com/rss/search?q={encoded}&hl=en&gl=US&ceid=US:en"
+    url = f"https://news.google.com/rss/search?q={urllib.parse.quote(topic)}&hl=en&gl=US&ceid=US:en"
     items = fetch_rss(url, count)
     return items if items else [(f"No news found for {topic}.", "")]
 
-# ── Boot Greeting ─────────────────────────────────────────────────────────────
-def boot_greeting():
-    _tts_ready.wait(timeout=10)
-    debug_tts()
-    time.sleep(0.5)
-
-    now  = datetime.datetime.now()
-    hour = now.hour
-    tod  = "Good morning" if hour < 12 else ("Good afternoon" if hour < 17 else "Good evening")
-
-    speak_wait(f"{tod}, {MASTER_NAME}. All systems are online. CACTUS is ready.")
-    time.sleep(0.3)
-
-    speak_wait("Pulling your weather now.")
-    weather = get_weather()
-    speak_wait(f"{WEATHER_CITY}: {weather}")
-    time.sleep(0.3)
-
-    speak_wait("Your Tamil Nadu briefing. Opening each article as I go.")
-    tn_news = get_tamilnadu_news(3)
-    for i, (title, link) in enumerate(tn_news, 1):
-        speak_wait(f"Headline {i}: {title}")
-        if link:
-            webbrowser.open(link)
-        time.sleep(0.4)
-
-    speak_wait("Global headlines now.")
-    g_news = get_global_news(3)
-    for i, (title, link) in enumerate(g_news, 1):
-        speak_wait(f"Headline {i}: {title}")
-        if link:
-            webbrowser.open(link)
-        time.sleep(0.4)
-
-    speak_wait(f"That's your morning briefing, {MASTER_NAME}. I'm listening.")
-
-# ── Command Handlers ──────────────────────────────────────────────────────────
-def handle_volume(cmd: str):
-    if "unmute" in cmd:
-        os.system("nircmd.exe mutesysvolume 0")
-        speak("Unmuted.")
-    elif "mute" in cmd:
-        os.system("nircmd.exe mutesysvolume 1")
-        speak("Muted.")
-    else:
-        m = re.search(r"(\d+)", cmd)
-        if m:
-            level = max(0, min(100, int(m.group(1))))
-            os.system(f"nircmd.exe setsysvolume {int(65535 * level / 100)}")
-            speak(f"Volume at {level} percent.")
-        elif "up" in cmd:
-            os.system("nircmd.exe changesysvolume 6554")
-            speak("Volume up.")
-        elif "down" in cmd:
-            os.system("nircmd.exe changesysvolume -6554")
-            speak("Volume down.")
-
-def handle_brightness(cmd: str):
-    m = re.search(r"(\d+)", cmd)
-    level = int(m.group(1)) if m else (30 if "dim" in cmd else 100)
-    level = max(0, min(100, level))
-    ps = (f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)"
-          f".WmiSetBrightness(1,{level})")
-    subprocess.run(["powershell", "-Command", ps], capture_output=True)
-    speak(f"Brightness at {level} percent.")
-
-def handle_whatsapp(cmd: str):
-    m = re.search(r"whatsapp\s+(\d+)\s+(.*)", cmd, re.IGNORECASE)
-    if m:
-        webbrowser.open(f"https://wa.me/{m.group(1)}?text={urllib.parse.quote(m.group(2))}")
-        speak("WhatsApp message ready to send.")
-    else:
-        webbrowser.open("https://web.whatsapp.com")
-        speak("Opening WhatsApp.")
-
-def handle_email(cmd: str):
-    to_m  = re.search(r"to\s+([\w@.\-]+)", cmd, re.IGNORECASE)
-    sub_m = re.search(r"subject\s+(.+?)(?=body|$)", cmd, re.IGNORECASE)
-    bod_m = re.search(r"body\s+(.+)", cmd, re.IGNORECASE)
-    to      = to_m.group(1)          if to_m  else ""
-    subject = sub_m.group(1).strip() if sub_m else ""
-    body    = bod_m.group(1).strip() if bod_m else ""
-    params  = urllib.parse.urlencode({"to": to, "su": subject, "body": body})
-    webbrowser.open(f"https://mail.google.com/mail/?view=cm&fs=1&{params}")
-    speak(f"Composing email to {to}.")
-
-def handle_news(cmd: str):
-    c = cmd.lower()
-    if "tamil" in c:
-        speak("Tamil Nadu headlines. Opening articles now.")
-        items = get_tamilnadu_news(4)
-    elif any(x in c for x in ["global", "world", "international"]):
-        speak("Global headlines. Opening articles now.")
-        items = get_global_news(4)
-    else:
-        topic = re.sub(r"(news|on|about|regarding|latest|headlines)", "", c, flags=re.IGNORECASE).strip()
-        speak(f"Fetching news on {topic}." if topic else "Pulling global news.")
-        items = get_topic_news(topic, 4) if topic else get_global_news(4)
+def read_news(items):
     for i, (title, link) in enumerate(items, 1):
         speak_wait(f"Headline {i}: {title}")
         if link:
             webbrowser.open(link)
-        time.sleep(0.4)
+        time.sleep(0.3)
 
-def handle_search(cmd: str):
-    query = re.sub(r"(search|google|look up|find)", "", cmd, flags=re.IGNORECASE).strip()
+# ── Spotify — desktop app only ────────────────────────────────────────────────
+def open_spotify(query: str = ""):
     if query:
-        webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote(query)}")
-        speak(f"Searching for {query}.")
+        encoded = urllib.parse.quote(query)
+        uri = f"spotify:search:{encoded}"
+        speak(f"Playing {query} on Spotify.")
+    else:
+        uri = "spotify:"
+        speak("Opening Spotify.")
 
-def handle_stocks(cmd: str):
-    ticker = re.sub(r"(stock|price|stocks|shares?|of|for|check)", "", cmd,
-                    flags=re.IGNORECASE).strip().upper()
-    if ticker:
-        webbrowser.open(f"https://finance.yahoo.com/quote/{ticker}")
-        speak(f"Pulling up {ticker}.")
+    # Open via URI — launches desktop app only, never browser
+    subprocess.Popen(
+        ["powershell", "-Command", f'Start-Process "{uri}"'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
-def handle_screenshot():
+    if query:
+        # Wait for Spotify to focus then hit Enter to play first result
+        time.sleep(2.5)
+        subprocess.Popen(
+            ["powershell", "-Command",
+             "$w=New-Object -ComObject WScript.Shell; "
+             "$w.AppActivate('Spotify'); "
+             "Start-Sleep -Milliseconds 600; "
+             "$w.SendKeys('{ENTER}')"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+# ── Volume ────────────────────────────────────────────────────────────────────
+def set_volume(query: str, direction: str = ""):
+    m = re.search(r"(\d+)", query)
+    if m:
+        level = max(0, min(100, int(m.group(1))))
+        os.system(f"nircmd.exe setsysvolume {int(65535 * level / 100)}")
+        speak(f"Volume at {level} percent.")
+    elif direction == "up":
+        os.system("nircmd.exe changesysvolume 6554")
+        speak("Volume up.")
+    elif direction == "down":
+        os.system("nircmd.exe changesysvolume -6554")
+        speak("Volume down.")
+
+# ── Brightness ────────────────────────────────────────────────────────────────
+def set_brightness(query: str, direction: str = ""):
+    m = re.search(r"(\d+)", query)
+    if m:
+        level = max(0, min(100, int(m.group(1))))
+    elif direction == "down":
+        level = 30
+    else:
+        level = 100
+    subprocess.run(
+        ["powershell", "-Command",
+         f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)"
+         f".WmiSetBrightness(1,{level})"],
+        capture_output=True
+    )
+    speak(f"Brightness at {level} percent.")
+
+# ── Screenshot ────────────────────────────────────────────────────────────────
+def take_screenshot():
     ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(os.path.expanduser("~"), "Pictures", f"cactus_{ts}.png")
     subprocess.run([
         "powershell", "-Command",
         f"Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
-        f"$b=New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::"
-        f"PrimaryScreen.Bounds.Width,[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); "
+        f"$b=New-Object System.Drawing.Bitmap("
+        f"[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width,"
+        f"[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); "
         f"$g=[System.Drawing.Graphics]::FromImage($b); "
         f"$g.CopyFromScreen(0,0,0,0,$b.Size); $b.Save('{path}')"
     ], capture_output=True)
     speak("Screenshot saved to Pictures.")
 
-def handle_media(cmd: str):
-    keys = {
-        "next": "{NEXTTRACK}", "skip": "{NEXTTRACK}",
-        "previous": "{PREVTRACK}", "prev": "{PREVTRACK}",
-        "pause": "{MEDIA_PLAY_PAUSE}", "resume": "{MEDIA_PLAY_PAUSE}",
-        "stop": "{MEDIA_STOP}"
+# ── Media keys ────────────────────────────────────────────────────────────────
+def send_media_key(key: str):
+    ps = f"$w=New-Object -ComObject WScript.Shell; $w.SendKeys('{key}')"
+    subprocess.run(["powershell", "-Command", ps], capture_output=True)
+
+# ── System ────────────────────────────────────────────────────────────────────
+def handle_system(action: str):
+    actions = {
+        "lock":     ("Locking up.", "rundll32.exe user32.dll,LockWorkStation"),
+        "sleep_pc": (f"Goodnight, {MASTER_NAME}.", "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
+        "shutdown": ("Shutting down.", "shutdown /s /t 5"),
+        "restart":  ("Restarting.", "shutdown /r /t 5"),
     }
-    for kw, key in keys.items():
-        if kw in cmd:
-            ps = f"$w=New-Object -ComObject WScript.Shell; $w.SendKeys('{key}')"
-            subprocess.run(["powershell", "-Command", ps], capture_output=True)
-            speak(f"{kw.capitalize()}.")
-            return
+    msg, cmd = actions.get(action, ("Unknown system command.", ""))
+    speak_wait(msg)
+    if cmd:
+        os.system(cmd)
 
-def handle_system(cmd: str):
-    if "sleep" in cmd:
-        speak(f"Goodnight, {MASTER_NAME}.")
-        time.sleep(1)
-        os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
-    elif "shutdown" in cmd:
-        speak("Shutting down. See you on the other side.")
-        os.system("shutdown /s /t 5")
-    elif "restart" in cmd:
-        speak("Restarting. Back in a moment.")
-        os.system("shutdown /r /t 5")
-    elif "lock" in cmd:
-        speak("Locking up.")
-        os.system("rundll32.exe user32.dll,LockWorkStation")
-
-def what_time() -> str:
-    return datetime.datetime.now().strftime("It's %I:%M %p on %A, %B %d.")
-
-# ── Quiet / Talk ──────────────────────────────────────────────────────────────
+# ── Quiet / Resume ────────────────────────────────────────────────────────────
 def enter_quiet_mode():
     global quiet_mode
-    msg = "Going silent. I'll be here when you need me."
-    _tts_queue.put(msg)
+    _tts_queue.put("Going silent. I'll be here.")
     _tts_queue.join()
     quiet_mode = True
     print("[CACTUS] Quiet mode ON.")
@@ -443,68 +330,167 @@ def enter_quiet_mode():
 def exit_quiet_mode():
     global quiet_mode
     quiet_mode = False
-    speak(f"Back online, {MASTER_NAME}. What do you need?")
+    speak(f"Back online, {MASTER_NAME}.")
 
-# ── Command Router ────────────────────────────────────────────────────────────
+# ── Boot Greeting ─────────────────────────────────────────────────────────────
+def boot_greeting():
+    _tts_ready.wait(timeout=10)
+    time.sleep(0.5)
+
+    hour = datetime.datetime.now().hour
+    tod  = "Good morning" if hour < 12 else ("Good afternoon" if hour < 17 else "Good evening")
+
+    speak_wait(f"{tod}, {MASTER_NAME}. All systems online. CACTUS is ready.")
+    time.sleep(0.2)
+
+    speak_wait("Pulling your weather.")
+    speak_wait(get_weather())
+    time.sleep(0.2)
+
+    speak_wait("Tamil Nadu briefing.")
+    read_news(get_tamilnadu_news(3))
+
+    speak_wait("Global headlines.")
+    read_news(get_global_news(3))
+
+    speak_wait(f"Briefing complete. I'm listening, {MASTER_NAME}.")
+
+# ── Master Command Router — Groq decides everything ───────────────────────────
 def route_command(cmd: str):
+    if not cmd.strip():
+        return
+
     c = cmd.lower().strip()
 
-    if any(x in c for x in ["be quiet", "shut up", "go quiet", "silence", "stop talking"]):
+    # Hard-coded quick exits that don't need Groq
+    if any(x in c for x in ["be quiet", "shut up", "go quiet", "stop talking", "silence"]):
         enter_quiet_mode(); return
-    if any(x in c for x in ["talk to me", "come back", "i need you", "stop being quiet"]):
+    if any(x in c for x in ["talk to me", "come back", "wake up", "stop being quiet"]):
         exit_quiet_mode(); return
     if quiet_mode:
         return
 
-    if any(x in c for x in ["volume", "mute", "unmute"]):
-        handle_volume(c)
-    elif any(x in c for x in ["brightness", "dim", "brighten"]):
-        handle_brightness(c)
-    elif "spotify" in c or re.search(r"\bplay\b.{1,60}\b(song|track|music|by|on spotify)?\b", c):
-        handle_spotify(c)
-    elif any(x in c for x in ["next track", "previous track", "next song", "skip", "pause music", "stop music", "resume music"]):
-        handle_media(c)
-    elif "whatsapp" in c:
-        handle_whatsapp(c)
-    elif "email" in c or "gmail" in c:
-        handle_email(c)
-    elif "news" in c or "headlines" in c:
-        handle_news(c)
-    elif "weather" in c:
-        m    = re.search(r"weather\s+(?:in|for|at)?\s*(.+)", c)
-        city = m.group(1).strip() if m else WEATHER_CITY
-        speak(get_weather(city))
-    elif "stock" in c or "share price" in c:
-        handle_stocks(c)
-    elif any(x in c for x in ["search", "google", "look up", "find"]):
-        handle_search(c)
-    elif "screenshot" in c:
-        handle_screenshot()
-    elif any(x in c for x in ["time", "date", "what day"]):
-        speak(what_time())
-    elif any(x in c for x in ["sleep pc", "shutdown", "restart", "lock pc", "lock screen", "lock"]):
-        handle_system(c)
-    elif "help" in c:
-        speak(
-            f"You can ask me anything, {MASTER_NAME}. "
-            "Spotify, volume, brightness, WhatsApp, Gmail, "
-            "news, weather, stocks, Google, screenshots, system controls, "
-            "or just talk to me. I'll figure it out."
-        )
-    else:
-        # Groq guesses intent and responds for EVERYTHING else
-        speak(guess_command(cmd))
+    print(f"[ROUTING] {cmd}")
 
-# ── Voice Loop — always listening, no wake word ───────────────────────────────
+    # Ask Groq to parse intent
+    parsed = parse_intent(cmd)
+    intent  = parsed.get("intent", "chat")
+    query   = parsed.get("query", "")
+    response = parsed.get("response", "")
+
+    print(f"[INTENT] {intent} | query: {query}")
+
+    # ── Execute based on intent ──────────────────────────────────────────────
+    if intent == "spotify":
+        open_spotify(query)
+
+    elif intent == "volume_up":
+        set_volume(query, "up")
+
+    elif intent == "volume_down":
+        set_volume(query, "down")
+
+    elif intent == "volume_set":
+        set_volume(query)
+
+    elif intent == "mute":
+        os.system("nircmd.exe mutesysvolume 1")
+        speak("Muted.")
+
+    elif intent == "unmute":
+        os.system("nircmd.exe mutesysvolume 0")
+        speak("Unmuted.")
+
+    elif intent == "brightness_up":
+        set_brightness(query, "up")
+
+    elif intent == "brightness_down":
+        set_brightness(query, "down")
+
+    elif intent == "brightness_set":
+        set_brightness(query)
+
+    elif intent == "weather":
+        speak(get_weather(query if query else None))
+
+    elif intent == "news_tamil":
+        speak("Tamil Nadu headlines.")
+        read_news(get_tamilnadu_news(4))
+
+    elif intent == "news_global":
+        speak("Global headlines.")
+        read_news(get_global_news(4))
+
+    elif intent == "news_topic":
+        speak(f"News on {query}.")
+        read_news(get_topic_news(query, 4))
+
+    elif intent == "stock":
+        webbrowser.open(f"https://finance.yahoo.com/quote/{query.upper()}")
+        speak(f"Pulling up {query.upper()}.")
+
+    elif intent == "search":
+        webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote(query)}")
+        speak(f"Searching for {query}.")
+
+    elif intent == "screenshot":
+        take_screenshot()
+
+    elif intent == "time":
+        speak(datetime.datetime.now().strftime("It's %I:%M %p on %A, %B %d."))
+
+    elif intent == "whatsapp":
+        m = re.search(r"(\d+)\s+(.*)", query)
+        if m:
+            webbrowser.open(f"https://wa.me/{m.group(1)}?text={urllib.parse.quote(m.group(2))}")
+            speak("WhatsApp message ready.")
+        else:
+            webbrowser.open("https://web.whatsapp.com")
+            speak("Opening WhatsApp.")
+
+    elif intent == "email":
+        webbrowser.open("https://mail.google.com/mail/?view=cm&fs=1")
+        speak("Opening Gmail compose.")
+
+    elif intent in ("lock", "sleep_pc", "shutdown", "restart"):
+        handle_system(intent)
+
+    elif intent == "media_next":
+        send_media_key("{NEXTTRACK}")
+        speak("Next track.")
+
+    elif intent == "media_prev":
+        send_media_key("{PREVTRACK}")
+        speak("Previous track.")
+
+    elif intent == "media_pause":
+        send_media_key("{MEDIA_PLAY_PAUSE}")
+        speak("Paused.")
+
+    elif intent == "media_resume":
+        send_media_key("{MEDIA_PLAY_PAUSE}")
+        speak("Resuming.")
+
+    elif intent == "quiet_mode":
+        enter_quiet_mode()
+
+    elif intent == "resume_mode":
+        exit_quiet_mode()
+
+    else:
+        # chat — full JARVIS conversation
+        speak(ask_groq_chat(cmd))
+
+# ── Voice Loop ────────────────────────────────────────────────────────────────
 def voice_loop():
     global voice_active
     try:
         import speech_recognition as sr
 
         recognizer = sr.Recognizer()
-        recognizer.energy_threshold         = 300
-        recognizer.dynamic_energy_threshold = True
-        recognizer.pause_threshold          = 0.8
+        recognizer.energy_threshold          = 300
+        recognizer.dynamic_energy_threshold  = True
+        recognizer.pause_threshold           = 0.8
 
         try:
             mic = sr.Microphone()
@@ -513,11 +499,11 @@ def voice_loop():
             return
 
         with mic as source:
-            print("[VOICE] Calibrating mic...")
+            print("[VOICE] Calibrating...")
             recognizer.adjust_for_ambient_noise(source, duration=1.5)
 
         voice_active = True
-        print("[CACTUS] Always listening. No wake word needed.")
+        print("[CACTUS] Always listening.")
 
         while True:
             if quiet_mode:
@@ -527,11 +513,9 @@ def voice_loop():
                 with mic as source:
                     audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
                 text = recognizer.recognize_google(audio).lower().strip()
-                if not text:
-                    continue
-                print(f"[HEARD] {text}")
-                route_command(text)
-
+                if text:
+                    print(f"[HEARD] {text}")
+                    route_command(text)
             except sr.WaitTimeoutError:
                 pass
             except sr.UnknownValueError:
@@ -541,24 +525,22 @@ def voice_loop():
                 time.sleep(1)
 
     except ImportError:
-        print("[VOICE] SpeechRecognition not available. Text mode only.")
+        print("[VOICE] SpeechRecognition unavailable. Text mode only.")
         voice_active = False
 
 # ── Terminal boot art ─────────────────────────────────────────────────────────
 def terminal_boot():
     os.system("cls" if os.name == "nt" else "clear")
-    lines = [
+    for line in [
         "  ██████╗ █████╗  ██████╗████████╗██╗   ██╗███████╗",
         "  ██╔════╝██╔══██╗██╔════╝╚══██╔══╝██║   ██║██╔════╝",
         "  ██║     ███████║██║        ██║   ██║   ██║███████╗",
         "  ██║     ██╔══██║██║        ██║   ██║   ██║╚════██║",
         "  ╚██████╗██║  ██║╚██████╗   ██║   ╚██████╔╝███████║",
         "   ╚═════╝╚═╝  ╚═╝ ╚═════╝   ╚═╝    ╚═════╝ ╚══════╝",
-        "",
-        "        Personal AI Assistant v5.0",
+        "", "        Personal AI Assistant v5.0",
         "  ─────────────────────────────────────────",
-    ]
-    for line in lines:
+    ]:
         print(f"\033[32m{line}\033[0m")
         time.sleep(0.06)
     print()
@@ -566,20 +548,16 @@ def terminal_boot():
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     terminal_boot()
-
     _tts_ready.wait(timeout=8)
-    debug_tts()
 
     voice_thread = threading.Thread(target=voice_loop, daemon=True)
     voice_thread.start()
 
     boot_greeting()
-
     time.sleep(2)
 
     if not voice_active:
-        print("\n[CACTUS] No mic detected — text mode active.")
-        print("[TYPE COMMANDS BELOW]\n")
+        print("\n[CACTUS] Text mode active.\n")
         while True:
             try:
                 cmd = input(">> ").strip()
@@ -593,8 +571,7 @@ def main():
                 speak_wait(f"Goodbye, {MASTER_NAME}.")
                 sys.exit(0)
     else:
-        print("\n[CACTUS] Always listening. Just talk.")
-        print("         Ctrl+C to exit.\n")
+        print("\n[CACTUS] Always listening. Just talk.\n")
         try:
             while True:
                 time.sleep(1)
