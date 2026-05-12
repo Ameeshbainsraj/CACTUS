@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# CACTUS specific
+.env.enc
+data/
+cactus_screenshots/
